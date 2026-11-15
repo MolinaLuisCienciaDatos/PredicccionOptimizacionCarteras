@@ -1,10 +1,353 @@
 ---
-title: "AnalisisVisualizacionDatos"
+title: "Análisis exploratorio y visualización de rendimientos"
 author: "Luis Molina Villar"
 date: "2026-11-15"
-output: html_document
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  fig.width = 8,
+  fig.height = 4.8
+)
+options(scipen = 999)
 ```
+
+# 1. Objetivo
+
+Este informe realiza un análisis exploratorio de los rendimientos diarios de los
+cinco activos (`X1`--`X5`) disponibles en `stock_returns_train.csv`. El objetivo
+es describir la calidad y estructura de los datos antes de estimar medias,
+covarianzas, predicciones y carteras.
+
+Los rendimientos están expresados en fracción: por ejemplo, `0.01` representa
+un rendimiento del 1 %. El conjunto contiene 378 observaciones. De acuerdo con
+el enunciado del proyecto, se mantiene la separación temporal de 258
+observaciones iniciales para entrenamiento y 120 posteriores para validación.
+
+# 2. Carga y preparación de los datos
+
+```{r carga-datos}
+datos <- read.csv("stock_returns_train.csv", stringsAsFactors = FALSE)
+activos <- grep("^X[1-5]$", names(datos), value = TRUE)
+
+datos$fecha <- as.Date(datos$fecha)
+datos$periodo <- as.integer(datos$periodo)
+
+stopifnot(length(activos) == 5)
+stopifnot(all(datos$periodo == seq_len(nrow(datos))))
+stopifnot(all(datos$fecha == sort(datos$fecha)))
+
+datos$bloque <- ifelse(datos$periodo <= 258, "Entrenamiento", "Validación")
+datos$bloque <- factor(datos$bloque, levels = c("Entrenamiento", "Validación"))
+
+rendimientos <- datos[activos]
+fecha_inicio <- min(datos$fecha)
+fecha_fin <- max(datos$fecha)
+```
+
+```{r vista-datos}
+knitr::kable(
+  head(datos[c("periodo", "fecha", activos)], 6),
+  digits = 6,
+  caption = "Primeras observaciones del conjunto de datos"
+)
+```
+
+El periodo observado va desde **`r format(fecha_inicio, "%d-%m-%Y")`** hasta
+**`r format(fecha_fin, "%d-%m-%Y")`**, con **`r nrow(datos)`** observaciones y
+**`r length(activos)`** activos.
+
+# 3. Calidad de los datos
+
+Se comprueban valores ausentes, duplicados, orden temporal y saltos anómalos en
+las fechas. Los días no laborables no se consideran errores: por eso la
+distancia entre fechas puede ser superior a un día natural.
+
+```{r calidad-datos}
+saltos_fecha <- as.integer(diff(datos$fecha))
+
+calidad <- data.frame(
+  Variable = names(datos)[names(datos) != "bloque"],
+  Tipo = vapply(datos[names(datos) != "bloque"], function(x) class(x)[1], character(1)),
+  Ausentes = vapply(datos[names(datos) != "bloque"], function(x) sum(is.na(x)), integer(1)),
+  Valores_unicos = vapply(datos[names(datos) != "bloque"], function(x) length(unique(x)), integer(1)),
+  row.names = NULL
+)
+
+knitr::kable(calidad, caption = "Comprobaciones básicas por variable")
+```
+
+No hay valores ausentes en las variables analizadas: **`r sum(is.na(datos))`**
+ausentes en total. Tampoco hay fechas duplicadas (**`r sum(duplicated(datos$fecha))`**)
+y el identificador `periodo` es consecutivo. El salto máximo entre fechas es de
+`r max(saltos_fecha)` días naturales, compatible con fines de semana y festivos.
+
+# 4. Estadísticos descriptivos
+
+```{r descriptivos}
+estadisticos <- data.frame(
+  Activo = activos,
+  Media = vapply(rendimientos, mean, numeric(1)),
+  Mediana = vapply(rendimientos, median, numeric(1)),
+  Desv_est = vapply(rendimientos, sd, numeric(1)),
+  Minimo = vapply(rendimientos, min, numeric(1)),
+  Q01 = vapply(rendimientos, quantile, numeric(1), probs = 0.01),
+  Q99 = vapply(rendimientos, quantile, numeric(1), probs = 0.99),
+  Maximo = vapply(rendimientos, max, numeric(1)),
+  Porcentaje_positivo = vapply(rendimientos, function(x) mean(x > 0), numeric(1))
+)
+
+estadisticos_presentacion <- estadisticos
+estadisticos_presentacion[-1] <- lapply(estadisticos_presentacion[-1], function(x) round(x, 5))
+estadisticos_presentacion$Porcentaje_positivo <- sprintf(
+  "%.1f%%", 100 * estadisticos$Porcentaje_positivo
+)
+
+knitr::kable(
+  estadisticos_presentacion,
+  caption = "Estadísticos de los rendimientos diarios (en fracción, salvo indicación)"
+)
+```
+
+La volatilidad se mide con la desviación estándar muestral del rendimiento
+diario. Para facilitar la lectura, la siguiente figura muestra los rendimientos
+en porcentaje.
+
+```{r series-temporales, fig.height=8}
+par(mfrow = c(3, 2), mar = c(3.2, 4, 2.2, 1), oma = c(1, 0, 1, 0))
+for (activo in activos) {
+  plot(
+    datos$fecha, 100 * datos[[activo]], type = "l",
+    col = "#2166AC", lwd = 0.8,
+    main = activo, xlab = "Fecha", ylab = "Rendimiento diario (%)"
+  )
+  abline(h = 0, col = "#B2182B", lty = 2)
+  abline(v = datos$fecha[258], col = "#4D4D4D", lty = 3)
+}
+plot.new()
+legend(
+  "center",
+  legend = c("Rendimiento", "Cero", "Fin del entrenamiento"),
+  col = c("#2166AC", "#B2182B", "#4D4D4D"),
+  lty = c(1, 2, 3), bty = "n", cex = 0.9
+)
+mtext("Evolución temporal de los rendimientos", outer = TRUE, line = -1, cex = 1.1)
+```
+
+La línea vertical separa visualmente entrenamiento y validación. En particular,
+`X4` presenta oscilaciones mucho mayores que el resto, algo que conviene tener
+en cuenta al estimar la matriz de covarianzas y al imponer restricciones de
+riesgo en la cartera.
+
+# 5. Distribuciones y valores extremos
+
+```{r distribuciones, fig.height=7}
+par(mfrow = c(2, 3), mar = c(4, 4, 2.2, 1))
+for (activo in activos) {
+  hist(
+    100 * rendimientos[[activo]], breaks = 25,
+    col = "#92C5DE", border = "white",
+    main = activo, xlab = "Rendimiento diario (%)", ylab = "Frecuencia"
+  )
+  abline(v = 100 * mean(rendimientos[[activo]]), col = "#B2182B", lwd = 2)
+}
+boxplot(
+  100 * rendimientos, names = activos, col = "#D1E5F0",
+  ylab = "Rendimiento diario (%)", main = "Comparación de distribuciones"
+)
+```
+
+```{r extremos}
+extremos <- do.call(rbind, lapply(activos, function(activo) {
+  x <- rendimientos[[activo]]
+  indices <- order(abs(x), decreasing = TRUE)[1:3]
+  data.frame(
+    Activo = activo,
+    Periodo = datos$periodo[indices],
+    Fecha = datos$fecha[indices],
+    Rendimiento = x[indices]
+  )
+}))
+extremos$Rendimiento <- round(extremos$Rendimiento, 5)
+
+knitr::kable(
+  extremos,
+  caption = "Tres observaciones con mayor rendimiento absoluto por activo"
+)
+```
+
+Los extremos no se eliminan automáticamente: son observaciones financieras
+válidas y eliminarlos podría subestimar el riesgo. Sí deben revisarse durante
+la modelización porque pueden influir mucho en medias y covarianzas muestrales.
+
+# 6. Dependencia entre activos
+
+```{r correlacion}
+correlaciones <- cor(rendimientos)
+covarianzas <- cov(rendimientos)
+
+knitr::kable(
+  round(correlaciones, 3),
+  caption = "Matriz de correlaciones"
+)
+knitr::kable(
+  round(covarianzas, 6),
+  caption = "Matriz de covarianzas"
+)
+```
+
+```{r mapa-correlacion, fig.height=5.5}
+paleta <- colorRampPalette(c("#B2182B", "#F7F7F7", "#2166AC"))(100)
+z <- correlaciones[nrow(correlaciones):1, ]
+image(
+  x = seq_along(activos), y = seq_along(activos), z = z,
+  col = paleta, zlim = c(-1, 1), axes = FALSE,
+  xlab = "Activo", ylab = "Activo", main = "Mapa de correlaciones"
+)
+axis(1, at = seq_along(activos), labels = activos)
+axis(2, at = seq_along(activos), labels = rev(activos))
+for (i in seq_along(activos)) {
+  for (j in seq_along(activos)) {
+    text(j, length(activos) - i + 1, labels = sprintf("%.2f", correlaciones[i, j]))
+  }
+}
+box()
+```
+
+La correlación mide co-movimiento lineal contemporáneo, pero no implica
+causalidad ni garantiza estabilidad fuera de la muestra. Para identificar los
+pares más relacionados en este conjunto se calcula:
+
+```{r pares-correlacion}
+indices_pares <- which(upper.tri(correlaciones), arr.ind = TRUE)
+pares <- data.frame(
+  Activo_1 = rownames(correlaciones)[indices_pares[, 1]],
+  Activo_2 = colnames(correlaciones)[indices_pares[, 2]],
+  Correlacion = correlaciones[indices_pares]
+)
+pares <- pares[order(-abs(pares$Correlacion)), ]
+pares_presentacion <- pares
+pares_presentacion$Correlacion <- round(pares_presentacion$Correlacion, 3)
+knitr::kable(pares_presentacion, caption = "Pares ordenados por correlación absoluta")
+```
+
+# 7. Rendimiento acumulado y volatilidad móvil
+
+El crecimiento acumulado se calcula como \(\prod_{t=1}^{T}(1+r_t)\). Esta
+figura es descriptiva: no representa una estrategia de cartera porque cada
+línea invierte el 100 % en un único activo.
+
+```{r acumulado}
+riqueza <- sapply(activos, function(activo) cumprod(1 + rendimientos[[activo]]))
+matplot(
+  datos$fecha, riqueza, type = "l", lty = 1, lwd = 1.2,
+  col = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A", "#66A61E"),
+  xlab = "Fecha", ylab = "Capital relativo", main = "Crecimiento de 1 unidad invertida"
+)
+abline(h = 1, col = "#4D4D4D", lty = 2)
+legend("topleft", legend = activos, col = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A", "#66A61E"), lty = 1, lwd = 1.2, bty = "n")
+```
+
+```{r volatilidad-movil}
+ventana <- 30
+volatilidad_movil <- sapply(activos, function(activo) {
+  x <- rendimientos[[activo]]
+  vapply(seq_along(x), function(i) {
+    if (i < ventana) NA_real_ else sd(x[(i - ventana + 1):i]) * sqrt(252)
+  }, numeric(1))
+})
+
+matplot(
+  datos$fecha, 100 * volatilidad_movil, type = "l", lty = 1, lwd = 1.2,
+  col = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A", "#66A61E"),
+  xlab = "Fecha", ylab = "Volatilidad anualizada (%)",
+  main = "Volatilidad móvil de 30 sesiones"
+)
+abline(v = datos$fecha[258], col = "#4D4D4D", lty = 3)
+legend("topleft", legend = activos, col = c("#1B9E77", "#D95F02", "#7570B3", "#E7298A", "#66A61E"), lty = 1, lwd = 1.2, bty = "n")
+```
+
+La volatilidad móvil se anualiza multiplicando por \(\sqrt{252}\). La
+anualización facilita la comparación, pero no supone que exista independencia
+perfecta entre días. Los cambios de volatilidad sugieren que una estimación
+constante de riesgo puede ser insuficiente y motivan comparar modelos con
+ventanas móviles o ponderaciones temporales.
+
+# 8. Comparación entre entrenamiento y validación
+
+```{r comparacion-bloques}
+comparacion_bloques <- do.call(rbind, lapply(levels(datos$bloque), function(bloque) {
+  filas <- datos$bloque == bloque
+  data.frame(
+    Bloque = bloque,
+    Observaciones = sum(filas),
+    Fecha_inicio = min(datos$fecha[filas]),
+    Fecha_fin = max(datos$fecha[filas]),
+    Media_global = mean(as.matrix(rendimientos[filas, ])),
+    Volatilidad_global = sd(as.matrix(rendimientos[filas, ]))
+  )
+}))
+knitr::kable(comparacion_bloques, digits = 5, caption = "Resumen global por bloque temporal")
+
+comparacion_activos <- do.call(rbind, lapply(levels(datos$bloque), function(bloque) {
+  filas <- datos$bloque == bloque
+  data.frame(
+    Bloque = bloque,
+    Activo = activos,
+    Media = vapply(rendimientos[filas, ], mean, numeric(1)),
+    Desv_est = vapply(rendimientos[filas, ], sd, numeric(1))
+  )
+}))
+comparacion_activos_presentacion <- comparacion_activos
+comparacion_activos_presentacion$Media <- round(comparacion_activos_presentacion$Media, 5)
+comparacion_activos_presentacion$Desv_est <- round(comparacion_activos_presentacion$Desv_est, 5)
+knitr::kable(comparacion_activos_presentacion, caption = "Media y desviación por activo y bloque")
+```
+
+La comparación debe interpretarse con cuidado porque la validación es un tramo
+temporal posterior, no una muestra aleatoria. Para evitar fuga de información,
+los modelos y las decisiones de cartera deben ajustarse usando únicamente las
+observaciones disponibles antes de cada fecha de decisión.
+
+# 9. Conclusiones para la modelización
+
+```{r conclusiones-calculo, include=FALSE}
+activo_mas_volatil <- activos[which.max(estadisticos$Desv_est)]
+activo_media_mayor <- activos[which.max(estadisticos$Media)]
+activo_media_menor <- activos[which.min(estadisticos$Media)]
+pares <- pares[order(-abs(pares$Correlacion)), ]
+```
+
+Los principales hallazgos exploratorios son:
+
+1. La base está ordenada temporalmente, no contiene ausencias y respeta la
+   numeración consecutiva de los periodos.
+2. **`r activo_mas_volatil`** es el activo con mayor desviación estándar diaria,
+   mientras que **`r activo_media_mayor`** tiene la media muestral más alta y
+   **`r activo_media_menor`** la más baja. Estas diferencias son descriptivas y
+   pueden ser sensibles a los valores extremos.
+3. Las correlaciones y covarianzas no son diagonales; por tanto, la
+   diversificación depende de estimar correctamente la dependencia conjunta,
+   no solo la volatilidad individual.
+4. La volatilidad móvil no tiene por qué ser constante. En la siguiente fase
+   conviene comparar estimaciones históricas con alternativas robustas o
+   ponderadas, siempre respetando la separación temporal.
+5. Para construir carteras factibles se deben mantener los pesos no negativos y
+   con suma uno. La EDA no selecciona por sí sola una cartera óptima: sirve para
+   detectar escalas, dependencia, cambios de riesgo y observaciones que deben
+   considerarse al evaluar los predictores y optimizadores.
+
+Como comprobaciones adicionales antes de cerrar el modelo pueden estudiarse la
+autocorrelación de los rendimientos, la autocorrelación de los rendimientos
+absolutos o al cuadrado y la estabilidad de las matrices de covarianzas en
+ventanas temporales. Estas pruebas deben hacerse sin utilizar información futura
+del periodo de validación.
